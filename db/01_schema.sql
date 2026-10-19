@@ -2144,6 +2144,91 @@ GRANT ALL ON TABLE founders_campus.user_wsender_sessions TO service_role;
 
 
 --
+-- Name: broadcast_campaigns; Type: TABLE; Schema: founders_campus; Owner: -
+--
+
+CREATE TABLE IF NOT EXISTS founders_campus.broadcast_campaigns (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    user_id uuid NOT NULL,
+    name text DEFAULT 'Promotional Broadcast'::text NOT NULL,
+    title text DEFAULT 'Promotional Broadcast'::text NOT NULL,
+    segment text DEFAULT 'all'::text NOT NULL,
+    audience_filter text DEFAULT 'all'::text NOT NULL,
+    message text,
+    message_template text,
+    media_url text,
+    media_type text,
+    total_recipients integer DEFAULT 0 NOT NULL,
+    total_count integer DEFAULT 0 NOT NULL,
+    sent_count integer DEFAULT 0 NOT NULL,
+    failed_count integer DEFAULT 0 NOT NULL,
+    status text DEFAULT 'draft'::text NOT NULL,
+    delay_seconds integer DEFAULT 10 NOT NULL,
+    delay_seconds_min integer DEFAULT 8 NOT NULL,
+    delay_seconds_max integer DEFAULT 15 NOT NULL,
+    batch_size integer DEFAULT 30 NOT NULL,
+    batch_cooldown_seconds integer DEFAULT 120 NOT NULL,
+    started_at timestamp with time zone,
+    completed_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    updated_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT broadcast_campaigns_status_check CHECK ((status = ANY (ARRAY['draft'::text, 'sending'::text, 'in_progress'::text, 'completed'::text, 'paused'::text, 'cancelled'::text, 'failed'::text])))
+);
+
+CREATE TABLE IF NOT EXISTS founders_campus.broadcast_queue (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    campaign_id uuid NOT NULL,
+    user_id uuid NOT NULL,
+    phone_number text NOT NULL,
+    customer_name text,
+    recipient_name text,
+    status text DEFAULT 'pending'::text NOT NULL,
+    error_message text,
+    retry_count integer DEFAULT 0 NOT NULL,
+    sent_at timestamp with time zone,
+    created_at timestamp with time zone DEFAULT now() NOT NULL,
+    CONSTRAINT broadcast_queue_status_check CHECK ((status = ANY (ARRAY['pending'::text, 'sending'::text, 'sent'::text, 'failed'::text])))
+);
+
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'broadcast_campaigns_pkey' AND conrelid = 'founders_campus.broadcast_campaigns'::regclass) THEN
+        ALTER TABLE ONLY founders_campus.broadcast_campaigns ADD CONSTRAINT broadcast_campaigns_pkey PRIMARY KEY (id);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'broadcast_queue_pkey' AND conrelid = 'founders_campus.broadcast_queue'::regclass) THEN
+        ALTER TABLE ONLY founders_campus.broadcast_queue ADD CONSTRAINT broadcast_queue_pkey PRIMARY KEY (id);
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'broadcast_campaigns_user_id_fkey' AND conrelid = 'founders_campus.broadcast_campaigns'::regclass) THEN
+        ALTER TABLE ONLY founders_campus.broadcast_campaigns ADD CONSTRAINT broadcast_campaigns_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'broadcast_queue_campaign_id_fkey' AND conrelid = 'founders_campus.broadcast_queue'::regclass) THEN
+        ALTER TABLE ONLY founders_campus.broadcast_queue ADD CONSTRAINT broadcast_queue_campaign_id_fkey FOREIGN KEY (campaign_id) REFERENCES founders_campus.broadcast_campaigns(id) ON DELETE CASCADE;
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = 'broadcast_queue_user_id_fkey' AND conrelid = 'founders_campus.broadcast_queue'::regclass) THEN
+        ALTER TABLE ONLY founders_campus.broadcast_queue ADD CONSTRAINT broadcast_queue_user_id_fkey FOREIGN KEY (user_id) REFERENCES auth.users(id) ON DELETE CASCADE;
+    END IF;
+END $$;
+
+CREATE INDEX IF NOT EXISTS idx_broadcast_campaigns_user_id ON founders_campus.broadcast_campaigns USING btree (user_id);
+CREATE INDEX IF NOT EXISTS idx_broadcast_queue_campaign_id ON founders_campus.broadcast_queue USING btree (campaign_id);
+CREATE INDEX IF NOT EXISTS idx_broadcast_queue_status ON founders_campus.broadcast_queue USING btree (status);
+CREATE INDEX IF NOT EXISTS idx_broadcast_queue_user_id ON founders_campus.broadcast_queue USING btree (user_id);
+
+ALTER TABLE founders_campus.broadcast_campaigns ENABLE ROW LEVEL SECURITY;
+ALTER TABLE founders_campus.broadcast_queue ENABLE ROW LEVEL SECURITY;
+
+DO $$ BEGIN
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'founders_campus' AND tablename = 'broadcast_campaigns' AND policyname = 'Users can manage own broadcast campaigns') THEN
+        CREATE POLICY "Users can manage own broadcast campaigns" ON founders_campus.broadcast_campaigns USING ((auth.uid() = user_id)) WITH CHECK ((auth.uid() = user_id));
+    END IF;
+    IF NOT EXISTS (SELECT 1 FROM pg_policies WHERE schemaname = 'founders_campus' AND tablename = 'broadcast_queue' AND policyname = 'Users can manage own broadcast queue') THEN
+        CREATE POLICY "Users can manage own broadcast queue" ON founders_campus.broadcast_queue USING ((auth.uid() = user_id)) WITH CHECK ((auth.uid() = user_id));
+    END IF;
+END $$;
+
+GRANT ALL ON TABLE founders_campus.broadcast_campaigns TO anon, authenticated, service_role;
+GRANT ALL ON TABLE founders_campus.broadcast_queue TO anon, authenticated, service_role;
+
+--
 -- Grants and Search Path for founders_campus
 --
 GRANT ALL ON SCHEMA founders_campus TO postgres, anon, authenticated, service_role;
@@ -2154,7 +2239,3 @@ ALTER DEFAULT PRIVILEGES IN SCHEMA founders_campus GRANT ALL ON TABLES TO anon, 
 ALTER DEFAULT PRIVILEGES IN SCHEMA founders_campus GRANT ALL ON ROUTINES TO anon, authenticated, service_role;
 ALTER DEFAULT PRIVILEGES IN SCHEMA founders_campus GRANT ALL ON SEQUENCES TO anon, authenticated, service_role;
 
-ALTER DATABASE postgres SET search_path TO founders_campus, public;
-ALTER ROLE anon SET search_path TO founders_campus, public;
-ALTER ROLE authenticated SET search_path TO founders_campus, public;
-ALTER ROLE service_role SET search_path TO founders_campus, public;
