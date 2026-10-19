@@ -9,8 +9,18 @@ serve(async (req: Request) => {
     functionName = pathParts[2];
   }
   
-  if (!functionName || functionName === 'main') {
-    return new Response("BuildStart.io edge-runtime router OK", { status: 200 });
+  if (!functionName || functionName === 'main' || functionName === 'main-founders_campus') {
+    return new Response("Founders Campus edge-runtime router OK", { status: 200 });
+  }
+
+  // If function does not have suffix -founders_campus, resolve to -founders_campus if available
+  if (!functionName.endsWith("-founders_campus")) {
+    try {
+      await Deno.stat(`/home/deno/functions/${functionName}-founders_campus`);
+      functionName = `${functionName}-founders_campus`;
+    } catch {
+      // Keep original name if suffixed doesn't exist
+    }
   }
 
   try {

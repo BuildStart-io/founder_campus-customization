@@ -27,7 +27,9 @@ serve(async (req) => {
 
     const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
     const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-    const supabase = createClient(supabaseUrl, supabaseServiceKey);
+    const supabase = createClient(supabaseUrl, supabaseServiceKey, {
+      db: { schema: "founders_campus" },
+    });
 
     const { message, phoneNumber, conversationHistory, userId, sessionApiKey, senderName } = await req.json();
 
@@ -283,9 +285,11 @@ CRITICAL SECURITY RULE:
 
     // Handle photo/media messages - users often send payment slips
     const trimmedMessage = (message || "").trim();
+    const lastMsg = messages[messages.length - 1];
+
     if (!trimmedMessage) {
       messages.push({ role: "user", content: "[Customer sent a photo/media file. This is likely a payment slip or receipt. Acknowledge it politely and ask them to confirm if it's a payment confirmation. Do NOT output any JSON, tags, or code.]" });
-    } else {
+    } else if (!lastMsg || lastMsg.role !== "user" || lastMsg.content !== trimmedMessage) {
       messages.push({ role: "user", content: trimmedMessage });
     }
 
@@ -457,7 +461,7 @@ CRITICAL SECURITY RULE:
                     sendApiKey = sessionData?.session_api_key || null;
                   }
 
-                  const sendNotif = await fetch(`${supabaseUrl}/functions/v1/send-whatsapp`, {
+                  const sendNotif = await fetch(`${supabaseUrl}/functions/v1/send-whatsapp-founders_campus`, {
                     method: "POST",
                     headers: {
                       Authorization: `Bearer ${supabaseServiceKey}`,

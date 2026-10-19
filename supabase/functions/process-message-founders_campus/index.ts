@@ -14,7 +14,9 @@ serve(async (req) => {
 
   const supabaseUrl = Deno.env.get("SUPABASE_URL")!;
   const supabaseServiceKey = Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!;
-  const supabase = createClient(supabaseUrl, supabaseServiceKey);
+  const supabase = createClient(supabaseUrl, supabaseServiceKey, {
+    db: { schema: "founders_campus" },
+  });
 
   let triggerSource = "cron";
   let triggerCorrelationId = "";
@@ -41,37 +43,25 @@ serve(async (req) => {
   // Step 2: Process messages in a loop
   let processedCount = 0;
   const maxIterations = 10; // Safety cap per invocation
+  const BUFFER_DELAY_MS = 4000; // 4 seconds debounce buffer
 
   for (let i = 0; i < maxIterations; i++) {
-    // Claim one pending message, enforcing per-user ordering:
-    // Only pick from users who don't have another message currently processing.
-    // We use a two-step approach since Supabase JS doesn't support FOR UPDATE SKIP LOCKED.
-    
-    // Find users currently processing
-    const { data: busyUsers } = await supabase
+    // Find contacts currently processing
+    const { data: busyRows } = await supabase
       .from("message_queue")
-      .select("user_id")
+      .select("phone_number, user_id")
       .eq("status", "processing");
 
-    const busyUserIds = (busyUsers || []).map((u: any) => u.user_id);
+    const busyPhones = new Set((busyRows || []).map((u: any) => `${u.user_id}_${u.phone_number}`));
 
-    // Find next pending message from a non-busy user
-    let query = supabase
+    // Find next pending messages
+    const { data: candidates, error: fetchError } = await supabase
       .from("message_queue")
       .select("*")
       .in("status", ["pending", "failed"])
       .lt("attempts", 3)
       .order("created_at", { ascending: true })
-      .limit(1);
-
-    if (busyUserIds.length > 0) {
-      // Exclude users with messages currently processing
-      for (const uid of busyUserIds) {
-        query = query.neq("user_id", uid);
-      }
-    }
-
-    const { data: candidates, error: fetchError } = await query;
+      .limit(10);
 
     if (fetchError) {
       console.error("[process-message] Queue fetch error:", fetchError);
@@ -82,12 +72,18 @@ serve(async (req) => {
       break; // No more work
     }
 
-    const msg = candidates[0];
+    // Pick candidate whose contact is not currently processing
+    const availableCandidates = candidates.filter((c: any) => !busyPhones.has(`${c.user_id}_${c.phone_number}`));
+    if (availableCandidates.length === 0) {
+      break; // All pending contacts are currently busy
+    }
+
+    const msg = availableCandidates[0];
     const corrId = msg.correlation_id || triggerCorrelationId || msg.id.substring(0, 8);
     const timings: Record<string, number> = {};
     const mark = (label: string) => { timings[label] = Date.now(); };
 
-    // Claim this message atomically
+    // Claim initial message atomically
     mark("claim_start");
     const { data: claimed, error: claimError } = await supabase
       .from("message_queue")
@@ -103,25 +99,59 @@ serve(async (req) => {
       continue;
     }
 
-    try {
-      await processMessage(supabase, supabaseUrl, supabaseServiceKey, msg, corrId, timings, mark);
+    // 4-second buffer delay: wait to allow consecutive rapid messages from this contact to arrive
+    const msgAgeMs = Date.now() - new Date(msg.created_at).getTime();
+    const remainingWaitMs = Math.max(0, BUFFER_DELAY_MS - msgAgeMs);
 
-      // Mark as done
+    if (remainingWaitMs > 0) {
+      console.log(`[${corrId}] Buffering 4s for contact ${msg.phone_number} (waiting ${remainingWaitMs}ms)...`);
+      await new Promise((r) => setTimeout(r, remainingWaitMs));
+    }
+
+    // Check for any additional pending messages from the same contact that arrived during the buffer
+    const { data: queuedFollowups } = await supabase
+      .from("message_queue")
+      .select("*")
+      .eq("user_id", msg.user_id)
+      .eq("phone_number", msg.phone_number)
+      .in("status", ["pending", "failed"])
+      .lt("attempts", 3)
+      .order("created_at", { ascending: true });
+
+    const batchMessages = [claimed];
+
+    if (queuedFollowups && queuedFollowups.length > 0) {
+      const followupIds = queuedFollowups.map((f: any) => f.id);
+      console.log(`[${corrId}] Grouping ${queuedFollowups.length} additional buffered message(s) for ${msg.phone_number}:`, followupIds);
+      await supabase
+        .from("message_queue")
+        .update({ status: "processing", attempts: msg.attempts + 1, updated_at: new Date().toISOString() })
+        .in("id", followupIds);
+
+      batchMessages.push(...queuedFollowups);
+    }
+
+    try {
+      await processMessage(supabase, supabaseUrl, supabaseServiceKey, batchMessages, corrId, timings, mark);
+
+      // Mark all batch messages as done
+      const allBatchIds = batchMessages.map((m: any) => m.id);
       mark("done_start");
       await supabase
         .from("message_queue")
         .update({ status: "done", processed_at: new Date().toISOString(), updated_at: new Date().toISOString() })
-        .eq("id", msg.id);
+        .in("id", allBatchIds);
       mark("done_end");
 
-      processedCount++;
+      processedCount += batchMessages.length;
 
       // Log timing breakdown
       const queueWaitMs = timings.claim_start - new Date(msg.created_at).getTime();
-      console.log(`[${corrId}] ✅ Message ${msg.id} processed | queue_wait=${queueWaitMs}ms claim=${timings.claim_end - timings.claim_start}ms ai=${(timings.ai_end || 0) - (timings.ai_start || 0)}ms send=${(timings.send_end || 0) - (timings.send_start || 0)}ms total=${Date.now() - new Date(msg.created_at).getTime()}ms`);
+      console.log(`[${corrId}] ✅ Batch of ${batchMessages.length} message(s) for ${msg.phone_number} processed | queue_wait=${queueWaitMs}ms buffer=${remainingWaitMs}ms ai=${(timings.ai_end || 0) - (timings.ai_start || 0)}ms send=${(timings.send_end || 0) - (timings.send_start || 0)}ms total=${Date.now() - new Date(msg.created_at).getTime()}ms`);
     } catch (error) {
+      const allBatchIds = batchMessages.map((m: any) => m.id);
       const newStatus = msg.attempts + 1 >= msg.max_attempts ? "dead" : "failed";
-      console.error(`[${corrId}] ❌ Message ${msg.id} failed (attempt ${msg.attempts + 1}/${msg.max_attempts} → ${newStatus}):`, error.message);
+      console.error(`[${corrId}] ❌ Batch of ${allBatchIds.length} message(s) failed (attempt ${msg.attempts + 1}/${msg.max_attempts} → ${newStatus}):`, error.message);
       await supabase
         .from("message_queue")
         .update({
@@ -129,7 +159,7 @@ serve(async (req) => {
           error_message: error.message || String(error),
           updated_at: new Date().toISOString(),
         })
-        .eq("id", msg.id);
+        .in("id", allBatchIds);
     }
   }
 
@@ -144,75 +174,80 @@ async function processMessage(
   supabase: any,
   supabaseUrl: string,
   supabaseServiceKey: string,
-  msg: any,
+  batchMessages: any[],
   corrId: string,
   timings: Record<string, number>,
   mark: (label: string) => void
 ) {
-  let { user_id: userId, phone_number: phoneNumber, sender_name: senderName, message_text: messageText, message_type: messageType, session_api_key: sessionApiKey, raw_payload: body, wsender_message_id: wahaMessageId } = msg;
+  const primaryMsg = batchMessages[0];
+  const { user_id: userId, phone_number: phoneNumber, sender_name: senderName, session_api_key: sessionApiKey } = primaryMsg;
 
-  let isVoice = false;
-  if (messageType === "ptt" || messageType === "audio") {
-    isVoice = true;
-  }
-
-  // Check if this is a media message — if so, store it but do NOT reply
-  const mediaTypes = ["image", "video", "document", "sticker", "vcard", "location"];
-  let isMediaMessage = mediaTypes.includes(messageType) || 
-    (!messageText && messageType !== "text" && !isVoice) ||
-    (body?.data?.messages?.messageBody === undefined && body?.data?.messages?.message?.conversation === undefined && !isVoice && !messageText);
-
-  // 1. Store the incoming message in conversations
+  // 1. Store incoming messages in conversations and transcribe any audio
   mark("store_inbound_start");
-  const { data: inboundMsg, error: insertError } = await supabase.from("conversations").insert({
-    phone_number: phoneNumber,
-    message: isVoice ? "🎤 [Voice Note: Transcribing...]" : messageText,
-    direction: "inbound",
-    message_type: messageType,
-    metadata: { senderName, event: body?.event, raw: body, correlationId: corrId, is_voice: isVoice },
-    user_id: userId,
-  }).select('id').single();
-  mark("store_inbound_end");
+  const inboundIds: string[] = [];
+  const mediaTypes = ["image", "video", "document", "sticker", "vcard", "location"];
+  let hasTextOrTranscribed = false;
 
-  if (insertError) {
-    console.error(`[${corrId}] Error storing message:`, insertError);
-  }
+  for (const msg of batchMessages) {
+    let { message_text: mText, message_type: mType, raw_payload: body, wsender_message_id: wahaMessageId } = msg;
+    const isVoice = (mType === "ptt" || mType === "audio");
 
-  if (isVoice) {
-    console.log(`[${corrId}] Detected voice message, attempting transcription...`);
-    const mediaUrl = body?.payload?.media?.url || body?.media?.url;
-    const transcription = await transcribeAudio(sessionApiKey, wahaMessageId, mediaUrl);
-    if (transcription) {
-      messageText = transcription;
-      if (inboundMsg?.id) {
-        await supabase.from("conversations").update({
-          message: transcription,
-          metadata: { senderName, event: body?.event, raw: body, correlationId: corrId, is_voice: true, transcription_provider: "gemini" }
-        }).eq('id', inboundMsg.id);
+    const { data: inboundMsg, error: insertError } = await supabase.from("conversations").insert({
+      phone_number: phoneNumber,
+      message: isVoice ? "🎤 [Voice Note: Transcribing...]" : (mText || `[${mType}]`),
+      direction: "inbound",
+      message_type: mType,
+      metadata: { senderName, event: body?.event, raw: body, correlationId: corrId, is_voice: isVoice },
+      user_id: userId,
+    }).select('id').single();
+
+    if (inboundMsg?.id) {
+      inboundIds.push(inboundMsg.id);
+    }
+
+    if (insertError) {
+      console.error(`[${corrId}] Error storing message:`, insertError);
+    }
+
+    if (isVoice) {
+      console.log(`[${corrId}] Detected voice message in batch, attempting transcription...`);
+      const mediaUrl = body?.payload?.media?.url || body?.media?.url;
+      const transcription = await transcribeAudio(sessionApiKey, wahaMessageId, mediaUrl);
+      if (transcription) {
+        msg.message_text = transcription;
+        hasTextOrTranscribed = true;
+        if (inboundMsg?.id) {
+          await supabase.from("conversations").update({
+            message: transcription,
+            metadata: { senderName, event: body?.event, raw: body, correlationId: corrId, is_voice: true, transcription_provider: "gemini" }
+          }).eq('id', inboundMsg.id);
+        }
+      } else {
+        console.log(`[${corrId}] Voice transcription failed for message ${msg.id}`);
+        if (inboundMsg?.id) {
+          await supabase.from("conversations").update({
+            message: "🎤 [Voice Note: Transcription failed]"
+          }).eq('id', inboundMsg.id);
+        }
       }
-    } else {
-      console.log(`[${corrId}] Transcription failed, skipping voice message and sending apology`);
-      if (inboundMsg?.id) {
-        await supabase.from("conversations").update({
-          message: "🎤 [Voice Note: Transcription failed]"
-        }).eq('id', inboundMsg.id);
-      }
-      
-      const apologyText = "I couldn't hear that clearly. Could you please resend it or type it out for me?";
-      await supabase.from("conversations").insert({
-        phone_number: phoneNumber,
-        message: apologyText,
-        direction: "outbound",
-        message_type: "text",
-        user_id: userId,
-      });
-      await sendWhatsApp(supabaseUrl, supabaseServiceKey, phoneNumber, apologyText, null, sessionApiKey);
-      return; 
+    } else if (mText && mText.trim()) {
+      hasTextOrTranscribed = true;
     }
   }
+  mark("store_inbound_end");
+
+  // Combine text from all messages in the batch
+  const messageText = batchMessages
+    .map((m: any) => (m.message_text || "").trim())
+    .filter(Boolean)
+    .join("\n");
+
+  const allMediaOnly = batchMessages.every((m: any) => {
+    const isV = (m.message_type === "ptt" || m.message_type === "audio");
+    return mediaTypes.includes(m.message_type) || (!m.message_text && m.message_type !== "text" && !isV);
+  }) && !hasTextOrTranscribed;
 
   // 1b. Contact billing: register this contact for the current cycle.
-  // Every first inbound message from a contact counts, regardless of whether the AI replies.
   const contactCheck = await registerContact(supabase, userId, phoneNumber, corrId);
   if (contactCheck.blocked) {
     console.log(`[${corrId}] New-contact limit reached for user ${userId}, not serving ${phoneNumber}`);
@@ -223,10 +258,9 @@ async function processMessage(
     supabase, supabaseUrl, supabaseServiceKey, userId, phoneNumber, senderName, sessionApiKey, corrId
   );
 
-
-  // Skip replying to media messages (images, PDFs, videos, etc.)
-  if (isMediaMessage) {
-    console.log(`[${corrId}] Media message (type: ${messageType}) from ${phoneNumber}, stored but not replying`);
+  // Skip replying to media-only messages without text
+  if (allMediaOnly) {
+    console.log(`[${corrId}] Media-only message batch from ${phoneNumber}, stored but not replying`);
     return;
   }
 
@@ -268,20 +302,26 @@ async function processMessage(
     .eq("phone_number", phoneNumber)
     .eq("user_id", userId);
 
-  const isFirstMessage = (convoCount || 0) <= 1;
+  const isFirstMessage = (convoCount || 0) <= Math.max(1, batchMessages.length);
 
   if (isFirstMessage) {
     const sent = await handleWelcomeMessage(supabase, supabaseUrl, supabaseServiceKey, userId, phoneNumber, messageText, sessionApiKey, corrId, timings, mark);
     if (sent) return;
   }
 
-  // 5. Get conversation history
+  // 5. Get conversation history (excluding current batch inbound messages so we don't duplicate them)
   mark("history_start");
-  const { data: conversationHistory } = await supabase
+  let historyQuery = supabase
     .from("conversations")
     .select("message, direction, created_at")
     .eq("phone_number", phoneNumber)
-    .eq("user_id", userId)
+    .eq("user_id", userId);
+
+  if (inboundIds.length > 0) {
+    historyQuery = historyQuery.not("id", "in", `(${inboundIds.join(",")})`);
+  }
+
+  const { data: conversationHistory } = await historyQuery
     .order("created_at", { ascending: false })
     .limit(10);
   mark("history_end");
@@ -293,7 +333,7 @@ async function processMessage(
 
   let aiResponse: Response;
   try {
-    aiResponse = await fetch(`${supabaseUrl}/functions/v1/ai-chat`, {
+    aiResponse = await fetch(`${supabaseUrl}/functions/v1/ai-chat-founders_campus`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${supabaseServiceKey}`,
@@ -496,7 +536,7 @@ async function sendWhatsApp(
   const body: any = { to, message, sessionApiKey };
   if (imageUrl) body.imageUrl = imageUrl;
 
-  const res = await fetch(`${supabaseUrl}/functions/v1/send-whatsapp`, {
+  const res = await fetch(`${supabaseUrl}/functions/v1/send-whatsapp-founders_campus`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${supabaseServiceKey}`,
@@ -521,7 +561,7 @@ async function sendWhatsAppMedia(
   mediaUrl: string,
   sessionApiKey: string
 ) {
-  const res = await fetch(`${supabaseUrl}/functions/v1/send-whatsapp`, {
+  const res = await fetch(`${supabaseUrl}/functions/v1/send-whatsapp-founders_campus`, {
     method: "POST",
     headers: {
       Authorization: `Bearer ${supabaseServiceKey}`,
@@ -700,7 +740,7 @@ async function maybeNotifyQualifiedLead(
       sendApiKey = sessionData?.session_api_key || null;
     }
 
-    const res = await fetch(`${supabaseUrl}/functions/v1/send-whatsapp`, {
+    const res = await fetch(`${supabaseUrl}/functions/v1/send-whatsapp-founders_campus`, {
       method: "POST",
       headers: {
         Authorization: `Bearer ${supabaseServiceKey}`,

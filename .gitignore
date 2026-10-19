@@ -1,8 +1,39 @@
+# Environment files — never commit credentials
 .env
+.env.*
+!.env.example
+**/.env
+**/.env.*
+!**/.env.example
+
+# Node / JS dependencies and builds
 node_modules/
 dist/
-.DS_Store
+build/
+.output/
+.npm
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# Docker runtime volumes & generated container data
+docker/volumes/db/data/
+docker/volumes/storage/
+docker/volumes/snippets/
+docker/volumes/waha_sessions/
+
+# Logs and temp files
 *.log
+*.tmp
+*.temp
+cloudflared.log
+
+# IDE & OS files
+.DS_Store
+Thumbs.db
 .gemini/
+.idea/
+.vscode/
 *.exp
 .vercel
+

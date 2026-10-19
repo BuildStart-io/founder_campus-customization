@@ -19,4 +19,26 @@ services:
       MINIO_SECRET_KEY: ${MINIO_SECRET_KEY}
       MINIO_REGION: ${MINIO_REGION}
       FIREBASE_SERVICE_ACCOUNT_JSON: ${FIREBASE_SERVICE_ACCOUNT_JSON:-}
-      WEBHOOK_URL_OVERRIDE: "https://regards-translate-adventures-pine.trycloudflare.com/functions/v1/webhook-wsender"
+      WEBHOOK_URL_OVERRIDE: "https://order-grove-mixer-proportion.trycloudflare.com/functions/v1/webhook-wsender-founders_campus"
+
+  waha:
+    container_name: waha
+    image: devlikeapro/waha:latest
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      WHATSAPP_HOOK_URL: http://supabase-envoy:8000/functions/v1/webhook-wsender-founders_campus
+      WHATSAPP_HOOK_EVENTS: message,message.any,session.status,poll.vote,poll.vote.failed
+      WHATSAPP_API_KEY: ${WAHA_API_KEY:-founders_campus_waha_secret}
+      WAHA_DASHBOARD_ENABLED: "true"
+      WAHA_DASHBOARD_USERNAME: ${WAHA_DASHBOARD_USERNAME:-admin}
+      WAHA_DASHBOARD_PASSWORD: ${WAHA_DASHBOARD_PASSWORD:-admin}
+      WHATSAPP_DEFAULT_ENGINE: WEBJS
+      WAHA_ZIP_MEDIA: "true"
+      WAHA_NOWEB_STORE: "true"
+      WHATSAPP_FILES_FOLDER: /app/.sessions/whatsapp-files
+      WHATSAPP_FILES_LIFETIME: "86400"
+    volumes:
+      - ./volumes/waha_sessions:/app/.sessions:rw
+

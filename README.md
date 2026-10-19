@@ -11,16 +11,16 @@ the Lovable AI Gateway and returns text. It touches no database and stores nothi
 │        │ supabase-js                                 │
 │  self-hosted Supabase                                │
 │    postgres + auth + kong + edge-runtime             │
-│      ├ webhook-wsender ─► message_queue              │
-│      ├ process-message  (queue drainer, cron)        │
-│      ├ ai-chat  ── builds prompt, quotas, orders ────┼──► Lovable ai-generate ──► AI Gateway
-│      ├ send-whatsapp ──► WAHA / Wsender              │
-│      ├ media-storage ──► MinIO                       │
-│      └ send-push ──────► Firebase                    │
+│      ├ webhook-wsender-founders_campus ─► message_queue              │
+│      ├ process-message-founders_campus  (queue drainer, cron)        │
+│      ├ ai-chat-founders_campus  ── builds prompt, quotas, orders ────┼──► Lovable ai-generate ──► AI Gateway
+│      ├ send-whatsapp-founders_campus ──► WAHA / Wsender              │
+│      ├ media-storage-founders_campus ──► MinIO                       │
+│      └ send-push-founders_campus ──────► Firebase                    │
 └──────────────────────────────────────────────────────┘
 ```
 
-`ai-chat` stays local on purpose: catalog, FAQs, plan quotas, order extraction and
+`ai-chat-founders_campus` stays local on purpose: catalog, FAQs, plan quotas, order extraction and
 `ai_usage_logs` never leave your database. The prompt, model
 (`google/gemini-3-flash-preview`) and `max_tokens` (500) are byte-identical to the
 Lovable-hosted version, so reply quality is unchanged.
@@ -28,10 +28,10 @@ Lovable-hosted version, so reply quality is unchanged.
 ## Layout
 
 ```
-db/01_schema.sql        full public schema: tables, enums, RLS, GRANTs, functions, triggers
+db/01_schema.sql        full founders_campus schema: tables, enums, RLS, GRANTs, functions, triggers
 db/02_seed.sql          plan limits + first-admin template (no tenant data — clean start)
 db/03_cron.sql          pg_cron jobs (queue drainer, follow-ups)
-supabase/functions/     all 12 edge functions (ai-generate is NOT here — it lives on Lovable)
+supabase/functions/     all edge functions with -founders_campus suffix (ai-generate is NOT here — it lives on Lovable)
 frontend/               the full dashboard, including super-admin and billing pages
 .env.example            every variable, split by process
 ```
@@ -54,8 +54,8 @@ frontend/               the full dashboard, including super-admin and billing pa
    code, so run the runtime with `--no-verify-jwt`.
 5. **Cron**: fill in the placeholders in `db/03_cron.sql` and run it.
 6. **WAHA**: point its webhook at
-   `http://<your-host>:8000/functions/v1/webhook-wsender`.
-7. **MinIO**: one public bucket per business, named `biz-<user_id>`; `media-storage`
+   `http://<your-host>:8000/functions/v1/webhook-wsender-founders_campus`.
+7. **MinIO**: one public bucket per business, named `biz-<user_id>`; `media-storage-founders_campus`
    creates them on demand.
 8. **Frontend**
    ```bash
