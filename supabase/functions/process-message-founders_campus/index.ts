@@ -43,7 +43,7 @@ serve(async (req) => {
   // Step 2: Process messages in a loop
   let processedCount = 0;
   const maxIterations = 10; // Safety cap per invocation
-  const BUFFER_DELAY_MS = 4000; // 4 seconds debounce buffer
+  const BUFFER_DELAY_MS = 10000; // 10 seconds debounce buffer
 
   for (let i = 0; i < maxIterations; i++) {
     // Find contacts currently processing
@@ -99,12 +99,12 @@ serve(async (req) => {
       continue;
     }
 
-    // 4-second buffer delay: wait to allow consecutive rapid messages from this contact to arrive
+    // 10-second buffer delay: wait to allow consecutive rapid messages from this contact to arrive
     const msgAgeMs = Date.now() - new Date(msg.created_at).getTime();
     const remainingWaitMs = Math.max(0, BUFFER_DELAY_MS - msgAgeMs);
 
     if (remainingWaitMs > 0) {
-      console.log(`[${corrId}] Buffering 4s for contact ${msg.phone_number} (waiting ${remainingWaitMs}ms)...`);
+      console.log(`[${corrId}] Buffering 10s for contact ${msg.phone_number} (waiting ${remainingWaitMs}ms)...`);
       await new Promise((r) => setTimeout(r, remainingWaitMs));
     }
 
