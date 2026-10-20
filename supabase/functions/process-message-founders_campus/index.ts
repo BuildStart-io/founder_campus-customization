@@ -43,7 +43,6 @@ serve(async (req) => {
   // Step 2: Process messages in a loop
   let processedCount = 0;
   const maxIterations = 10; // Safety cap per invocation
-  const BUFFER_DELAY_MS = 10000; // 10 seconds debounce buffer
 
   for (let i = 0; i < maxIterations; i++) {
     // Find contacts currently processing
@@ -99,12 +98,32 @@ serve(async (req) => {
       continue;
     }
 
-    // 10-second buffer delay: wait to allow consecutive rapid messages from this contact to arrive
+    // Buffer delay: wait to allow consecutive rapid messages from this contact to arrive
+    // Check if user has configured a custom buffer delay in settings (default 10s)
+    let bufferDelayMs = 10000;
+    try {
+      const { data: delayRows } = await supabase
+        .from("settings")
+        .select("key, value")
+        .eq("user_id", msg.user_id)
+        .in("key", ["buffer_delay", "auto_responses"]);
+
+      for (const row of delayRows || []) {
+        if (row.key === "buffer_delay" && (row.value as any)?.seconds !== undefined) {
+          bufferDelayMs = Math.max(0, Math.min(60, Number((row.value as any).seconds))) * 1000;
+        } else if (row.key === "auto_responses" && (row.value as any)?.buffer_delay_seconds !== undefined && bufferDelayMs === 10000) {
+          bufferDelayMs = Math.max(0, Math.min(60, Number((row.value as any).buffer_delay_seconds))) * 1000;
+        }
+      }
+    } catch {
+      // fallback to 10s default
+    }
+
     const msgAgeMs = Date.now() - new Date(msg.created_at).getTime();
-    const remainingWaitMs = Math.max(0, BUFFER_DELAY_MS - msgAgeMs);
+    const remainingWaitMs = Math.max(0, bufferDelayMs - msgAgeMs);
 
     if (remainingWaitMs > 0) {
-      console.log(`[${corrId}] Buffering 10s for contact ${msg.phone_number} (waiting ${remainingWaitMs}ms)...`);
+      console.log(`[${corrId}] Buffering ${bufferDelayMs / 1000}s for contact ${msg.phone_number} (waiting ${remainingWaitMs}ms)...`);
       await new Promise((r) => setTimeout(r, remainingWaitMs));
     }
 

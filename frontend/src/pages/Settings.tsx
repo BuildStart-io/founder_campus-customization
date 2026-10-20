@@ -68,8 +68,9 @@ export default function Settings() {
     { account_type: "bank", account_label: "", account_number: "", account_name: "" }
   ]);
 
-  // Auto Responses
+  // Auto Responses & Message Buffer Delay
   const [autoResponsesEnabled, setAutoResponsesEnabled] = useState(true);
+  const [bufferDelaySeconds, setBufferDelaySeconds] = useState(10);
 
   // Delivery Settings
   const [freeDeliveryThreshold, setFreeDeliveryThreshold] = useState<number>(0);
@@ -166,9 +167,21 @@ export default function Settings() {
             }
             break;
           }
-          case "auto_responses":
-            setAutoResponsesEnabled((setting.value as any)?.enabled ?? true);
+          case "auto_responses": {
+            const aVal = setting.value as any;
+            setAutoResponsesEnabled(aVal?.enabled ?? true);
+            if (aVal?.buffer_delay_seconds !== undefined) {
+              setBufferDelaySeconds(Number(aVal.buffer_delay_seconds));
+            }
             break;
+          }
+          case "buffer_delay": {
+            const bVal = setting.value as any;
+            if (bVal?.seconds !== undefined) {
+              setBufferDelaySeconds(Number(bVal.seconds));
+            }
+            break;
+          }
           case "order_notifications":
             setNotificationPhone((setting.value as any)?.phone || "");
             break;
@@ -554,7 +567,9 @@ export default function Settings() {
   };
 
   const handleSaveAutoResponses = () => {
-    saveSettings("auto_responses", { enabled: autoResponsesEnabled });
+    const sec = Math.max(0, Math.min(60, Number(bufferDelaySeconds) || 10));
+    saveSettings("auto_responses", { enabled: autoResponsesEnabled, buffer_delay_seconds: sec });
+    saveSettings("buffer_delay", { seconds: sec });
   };
 
   const handleSaveDelivery = () => {
@@ -1169,18 +1184,21 @@ export default function Settings() {
               </CardContent>
             </Card>
 
-            {/* Auto Responses */}
+            {/* Auto Responses & Message Debounce Buffer */}
             <Card>
               <CardHeader>
-                <CardTitle>Auto Responses</CardTitle>
+                <CardTitle className="flex items-center gap-2">
+                  <Clock className="h-5 w-5 text-primary" />
+                  Auto Responses & Message Grouping
+                </CardTitle>
                 <CardDescription>
-                  Enable or disable automatic AI-powered responses
+                  Configure AI automatic responses and multi-message debounce delay
                 </CardDescription>
               </CardHeader>
-              <CardContent className="space-y-4">
+              <CardContent className="space-y-6">
                 <div className="flex items-center justify-between">
                   <div className="space-y-0.5">
-                    <Label htmlFor="auto-responses">Enable Auto Responses</Label>
+                    <Label htmlFor="auto-responses" className="text-base font-medium">Enable Auto Responses</Label>
                     <p className="text-sm text-muted-foreground">
                       When enabled, the AI will automatically respond to customer messages
                     </p>
@@ -1191,6 +1209,38 @@ export default function Settings() {
                     onCheckedChange={setAutoResponsesEnabled}
                   />
                 </div>
+
+                <div className="border-t pt-4 space-y-3">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <Label htmlFor="buffer-delay" className="text-sm font-medium">
+                        Message Grouping Buffer (Debounce Delay)
+                      </Label>
+                      <p className="text-xs text-muted-foreground mt-0.5">
+                        Wait time to group multiple rapid incoming messages from the same customer into a single AI response
+                      </p>
+                    </div>
+                    <span className="text-sm font-semibold text-primary px-2.5 py-0.5 bg-primary/10 rounded-full border border-primary/20">
+                      {bufferDelaySeconds}s
+                    </span>
+                  </div>
+                  <div className="flex items-center gap-3">
+                    <Input
+                      id="buffer-delay"
+                      type="number"
+                      min={0}
+                      max={60}
+                      value={bufferDelaySeconds}
+                      onChange={(e) => setBufferDelaySeconds(Math.max(0, Math.min(60, Number(e.target.value) || 0)))}
+                      className="w-24 font-mono font-medium"
+                    />
+                    <span className="text-sm text-muted-foreground">seconds (0 - 60s)</span>
+                  </div>
+                  <p className="text-[11px] text-muted-foreground bg-muted/50 p-2.5 rounded-md border">
+                    💡 <strong>Tip:</strong> If a customer sends 3 short messages in a row (e.g., <em>"Hello"</em>, <em>"I need course details"</em>, <em>"How much is it?"</em>), the system waits up to this duration to combine them all so the AI delivers one comprehensive answer.
+                  </p>
+                </div>
+
                 <Button onClick={handleSaveAutoResponses} disabled={saving}>
                   {saving ? (
                     <Loader2 className="mr-2 h-4 w-4 animate-spin" />
